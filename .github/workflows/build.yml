@@ -1,0 +1,106 @@
+name: build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # jquery 1.11.1 was published with npm 1.2.25, which Node v0.10.10 bundles
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "0.10.10"
+
+      - name: Check toolchain
+        run: |
+          node --version
+          npm --version
+          test "$(node --version)" = "v0.10.10"
+          test "$(npm --version)" = "1.2.25"
+
+      - name: Install faketime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y faketime
+
+      # Resolve the devDependency tree as of the 1.11.1 release (2014-05-01).
+      # npm 1.2.25 / Node 0.10.10 ship a 2013 CA store that cannot verify the
+      # registry certificate, hence strict-ssl=false.
+      - name: Install dependencies
+        run: npm install --strict-ssl=false --registry='https://:2014-05-01T18%3A05%3A32.863Z@time-machines-npm.sealsecurity.io/'
+
+      # grunt stamps the build date into dist/jquery.js ("Date:") and the
+      # copyright year into dist/jquery.min.js; pin the clock to the release.
+      - name: Build dist (grunt)
+        env:
+          TZ: UTC
+        run: faketime '2014-05-01 17:42:00' ./node_modules/.bin/grunt
+
+      # Same as makeReleaseCopies() in build/release.js (non-prerelease)
+      - name: Create dist/cdn release copies
+        run: |
+          node <<'EOF'
+          var fs = require( "fs" ),
+            version = JSON.parse( fs.readFileSync( "package.json", "utf8" ) ).version,
+            devFile = "dist/jquery.js",
+            minFile = "dist/jquery.min.js",
+            mapFile = "dist/jquery.min.map",
+            cdnFolder = "dist/cdn",
+            releaseFiles = {
+              "jquery-VER.js": devFile,
+              "jquery-VER.min.js": minFile,
+              "jquery-VER.min.map": mapFile,
+              "jquery.js": devFile,
+              "jquery.min.js": minFile,
+              "jquery.min.map": mapFile,
+              "jquery-latest.js": devFile,
+              "jquery-latest.min.js": minFile,
+              "jquery-latest.min.map": mapFile
+            };
+          if ( !fs.existsSync( cdnFolder ) ) {
+            fs.mkdirSync( cdnFolder );
+          }
+          Object.keys( releaseFiles ).forEach(function( key ) {
+            var text,
+              builtFile = releaseFiles[ key ],
+              unpathedFile = key.replace( /VER/g, version ),
+              releaseFile = cdnFolder + "/" + unpathedFile;
+            if ( /\.map$/.test( releaseFile ) ) {
+              // Map files reference the renamed min/dev files
+              text = fs.readFileSync( builtFile, "utf8" )
+                .replace( /"file":"([^"]+)","sources":\["([^"]+)"\]/,
+                  "\"file\":\"" + unpathedFile.replace( /\.min\.map/, ".min.js" ) +
+                  "\",\"sources\":[\"" + unpathedFile.replace( /\.min\.map/, ".js" ) + "\"]" );
+              fs.writeFileSync( releaseFile, text );
+            } else if ( /\.min\.js$/.test( releaseFile ) ) {
+              // The CDN min files drop the sourceMappingURL comment
+              text = fs.readFileSync( builtFile, "utf8" )
+                .replace( /\/\/# sourceMappingURL=\S+/, "" );
+              fs.writeFileSync( releaseFile, text );
+            } else {
+              fs.writeFileSync( releaseFile, fs.readFileSync( builtFile ) );
+            }
+            console.log( "Created " + releaseFile );
+          });
+          EOF
+          ls -l dist dist/cdn
+
+      # .github exists only on the build fork; drop it so this workflow stays
+      # out of the package without touching the shipped .npmignore
+      - name: Pack
+        run: |
+          rm -rf .github
+          npm pack
+          mkdir -p out
+          mv jquery-1.11.1.tgz out/
+          tar tzf out/jquery-1.11.1.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jquery-1.11.1
+          path: out/jquery-1.11.1.tgz
+          if-no-files-found: error

@@ -1,3 +1,47 @@
 language: node_js
 node_js:
 - '0.10'
+addons:
+  apt:
+    packages:
+    - apache2
+    - libapache2-mod-php
+before_script:
+- phantomjs --version
+# Serve the repo root with Apache + mod_php (as jQuery's own test infra did)
+# so test/index.html can reach test/data/*.php. KeepAlive is off because
+# PhantomJS occasionally loses an XHR reusing a connection Apache is closing.
+- sudo a2dismod -f mpm_event
+- sudo a2enmod mpm_prefork $(basename -s .load /etc/apache2/mods-available/php*.load)
+- |
+  printf '%s\n' \
+    '<VirtualHost *:80>' \
+    "  DocumentRoot $TRAVIS_BUILD_DIR" \
+    '  KeepAlive Off' \
+    "  <Directory $TRAVIS_BUILD_DIR>" \
+    '    Options FollowSymLinks' \
+    '    AllowOverride All' \
+    '    Require all granted' \
+    '  </Directory>' \
+    '  ErrorLog ${APACHE_LOG_DIR}/error.log' \
+    '  CustomLog ${APACHE_LOG_DIR}/access.log combined' \
+    '</VirtualHost>' | sudo tee /etc/apache2/sites-available/jquery-test.conf
+- sudo a2dissite 000-default
+- sudo a2ensite jquery-test
+# www-data must be able to traverse down to the build dir
+- d="$TRAVIS_BUILD_DIR"; while [ "$d" != "/" ]; do sudo chmod o+x "$d"; d="$(dirname "$d")"; done
+# test/data/support/csp-*.php write this file as www-data
+- chmod a+w test/data/support/csp.log
+- sudo apache2ctl configtest
+- sudo service apache2 restart
+- sudo apache2ctl -M | grep -i php
+- test "$(curl -sf 'http://127.0.0.1/test/data/name.php?name=foo')" = bar
+- curl -sf -o /dev/null http://127.0.0.1/test/index.html
+script:
+# jsonlint, build (dist/jquery*.js), jshint, jscs, uglify, dist, compare_size
+- npm test
+# The QUnit suite in test/index.html, run headless against the build above
+- phantomjs test/phantomjs-qunit-runner.js http://127.0.0.1/test/index.html
+after_failure:
+- sudo tail -n 200 /var/log/apache2/error.log
+- sudo tail -n 300 /var/log/apache2/access.log
